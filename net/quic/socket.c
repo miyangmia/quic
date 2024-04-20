@@ -148,8 +148,12 @@ struct sock *quic_sock_lookup(struct sk_buff *skb, union quic_addr *sa, union qu
 	}
 	spin_unlock(&head->lock);
 
-	if (sk && sk->sk_reuseport)
+	if (sk && sk->sk_reuseport) {
+		/* Decrypt client initial packets for user defined selectors */
+		if (!quic_packet_early_decrypt(skb))
+			skb->decrypted = 1;
 		sk = reuseport_select_sock(sk, quic_shash(net, da), skb, 1);
+	}
 	return sk;
 }
 
@@ -1007,7 +1011,7 @@ static int quic_accept_sock_init(struct sock *sk, struct quic_request_sock *req)
 	skb_queue_splice_init(quic_inq_backlog_list(inq), &tmpq);
 	skb = __skb_dequeue(&tmpq);
 	while (skb) {
-		quic_packet_process(sk, skb, 0);
+		quic_packet_process(sk, skb, skb->decrypted);
 		skb = __skb_dequeue(&tmpq);
 	}
 

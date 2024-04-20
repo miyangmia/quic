@@ -476,6 +476,71 @@ err:
 	return err;
 }
 
+int quic_packet_early_decrypt(struct sk_buff *skb)
+{
+	u8 *p = skb->data, *data, flag = CRYPTO_ALG_ASYNC;
+	struct quic_connection_id dcid = {};
+	int len = skb->len, err = -EINVAL;
+	struct quic_packet_info pki = {};
+	struct quic_crypto *crypto;
+	u32 version;
+	u64 dlen;
+
+	crypto = kzalloc(sizeof(*crypto), GFP_ATOMIC);
+	if (!crypto)
+		return -ENOMEM;
+	data = kmemdup(skb->data, skb->len, GFP_ATOMIC);
+	if (!data) {
+		kfree(crypto);
+		return -ENOMEM;
+	}
+	if (len < 5)
+		goto out;
+	p++;
+	len--;
+	/* VERSION */
+	version = quic_get_int(&p, 4);
+	len -= 4;
+	/* DCID */
+	if (len-- < 1)
+		goto out;
+	dlen = quic_get_int(&p, 1);
+	if (len < dlen || dlen > QUIC_CONNECTION_ID_MAX_LEN)
+		goto out;
+	quic_connection_id_update(&dcid, p, dlen);
+	len -= dlen;
+	p += dlen;
+	/* SCID */
+	if (len-- < 1)
+		goto out;
+	dlen = quic_get_int(&p, 1);
+	if (len < dlen || dlen > QUIC_CONNECTION_ID_MAX_LEN)
+		goto out;
+	len -= dlen;
+	p += dlen;
+	/* TOKEN */
+	if (!quic_get_var(&p, &len, &dlen) || len < dlen)
+		goto out;
+	p += dlen;
+	len -= dlen;
+	/* LENGTH */
+	if (!quic_get_var(&p, &len, &pki.length) || pki.length > len)
+		goto out;
+	err = quic_crypto_initial_keys_install(crypto, &dcid, version, flag, 1);
+	if (err)
+		goto out;
+	pki.number_offset = p - skb->data;
+	pki.crypto_done = quic_packet_decrypt_done;
+	err = quic_crypto_decrypt(crypto, skb, &pki);
+	if (err) /* recover the original data */
+		memcpy(skb->data, data, skb->len);
+	quic_crypto_destroy(crypto);
+out:
+	kfree(crypto);
+	kfree(data);
+	return err;
+}
+
 /* Initial Packet {
  *   Header Form (1) = 1,
  *   Fixed Bit (1) = 1,
