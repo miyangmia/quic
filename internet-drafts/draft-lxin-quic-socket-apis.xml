@@ -1,0 +1,1674 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?xml-model href="rfc7991bis.rnc"?>
+
+<rfc
+  xmlns:xi="http://www.w3.org/2001/XInclude"
+  category="std"
+  docName="draft-lxin-quic-socket-apis-00"
+  ipr="trust200902"
+  submissionType="IETF"
+  consensus="true"
+  xml:lang="en"
+  version="3">
+
+<front>
+<title abbrev="QUIC socket APIs">Sockets API Extensions for In-kernel QUIC Implementations</title>
+
+<seriesInfo name="Internet-Draft" value="draft-lxin-quic-socket-apis-00"/>
+
+<author fullname="Xin Long" initials="L" role="editor" surname="Xin">
+  <organization>Red Hat</organization>
+  <address>
+    <postal>
+      <street>20 Deerfiled Drive</street>
+      <city>Ottawa</city>
+      <region>ON</region>
+      <country>CA</country>
+    </postal>
+    <email>lucien.xin@gmail.com</email>
+  </address>
+</author>
+
+<date year="2024"/>
+
+<area>Web and Internet Transport</area>
+<workgroup>Internet Engineering Task Force</workgroup>
+
+<keyword>QUIC socket APIs</keyword>
+
+<abstract>
+<t>This document describes a mapping of these In-kernel QUIC Implementations
+into a sockets API.  The benefits of this mapping include compatibility for
+TCP applications, access to new QUIC features, and a consolidated error and
+event notification scheme.</t>
+</abstract>
+</front>
+
+<middle>
+<section title='Introduction'>
+<t>The sockets API has provided a standard mapping of the Internet
+Protocol suite to many operating systems.  Both TCP <xref target='RFC9293'/>
+and UDP <xref target='RFC0768'/> have benefited from this standard
+representation and access method across many diverse platforms.
+SCTP <xref target='RFC6458'/> has also created its own sockets API.
+Base on <xref target='RFC6458'/>, this document defines a method to map
+the existing sockets API for use with In-kernel QUIC, providing both a
+base for access to new features and compatibility so that most existing
+TCP applications can be migrated to QUIC with few (if any) changes.</t>
+<t>Some of the QUIC mechanisms cannot be adequately mapped to an
+existing socket interface.  In some cases, it is more desirable to
+have a new interface instead of using existing socket calls.</t>
+<section title="Conventions">
+<t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in
+<xref target='RFC2119'/>.</t>
+</section>
+</section>
+
+
+<section title='Data Types'>
+<t>Whenever possible, Portable Operating System Interface (POSIX) data
+types defined in IEEE-1003.1-2008 are used: uintN_t means an
+unsigned integer of exactly N bits (e.g., uint16_t).  This document
+also assumes the argument data types from POSIX when possible (e.g.,
+the final argument to setsockopt() is a socklen_t value).  Whenever
+buffer sizes are specified, the POSIX size_t data type is used.</t>
+</section>
+
+
+<section title='Interface'>
+<t>A typical QUIC server uses the following socket calls in sequence to
+prepare an endpoint for servicing requests:</t>
+<t>o  socket()</t>
+<t>o  bind()</t>
+<t>o  listen()</t>
+<t>o  accept()</t>
+<t>o  quic_server_handshake()</t>
+<t>o  recvmsg()</t>
+<t>o  sendmsg()</t>
+<t>o  close()</t>
+<t>It is similar to TCP server, except quic_server_handshake() call where
+the TLS message exchange happens to complete the handshake. See
+<xref target='advanced_handshake'/>.</t>
+<t>All TLS handshake messages carried in QUIC packets MUST be processed in
+userspace. The client initial packet received will cause accept() to create
+a new socket and return, but the TLS handshake message carried in it will
+be received via this new socket by quic_server_handshake().</t>
+<t>A typical QUIC client uses the following calls in sequence to set up
+an association with a server to request services:</t>
+<t>o  socket()</t>
+<t>o  connect()</t>
+<t>o  quic_client_handshake()</t>
+<t>o  sendmsg()</t>
+<t>o  recvmsg()</t>
+<t>o  close()</t>
+<t>It is similar to TCP client, except quic_client_handshake() call where
+the TLS message exchange happens to complete the handshake. See
+<xref target='advanced_handshake'/>.</t>
+<t>On client, connect() SHOULD not send any packet to server, and all
+TLS handshake messages are created via TLS library and sent out by
+quic_client_handshake().</t>
+<t>In the implementation, one QUIC socket represents one QUIC connection
+and MAY hold multiple UDP sockets at the same time for connection migration
+or the future multiple path feature. Meanwhile, one lower UDP socket MAY
+serve for multiple QUIC sockets.</t>
+<section title='Basic Operation'>
+<section title='socket()'>
+<t>Applications use socket() to create a socket descriptor to represent
+an QUIC endpoint.</t>
+<t>The function prototype is</t>
+<sourcecode type="language C">
+int socket(int domain,
+           int type,
+           int protocol);
+</sourcecode>
+<t>and one uses PF_INET or PF_INET6 as the domain, SOCK_STREAM or
+SOCK_DGRAM as the type, and IPPROTO_QUIC as the protocol.</t>
+<t>Note that QUIC does not possess a protocol number allocated from IANA,
+and like IPPROTO_MPTCP, IPPROTO_QUIC is merely a value used when opening
+a QUIC socket, and it can be defined with different value depending on
+the implementation.</t>
+<t>The function returns a socket descriptor, or -1 in case of an error.
+Using the PF_INET domain indicates the creation of an endpoint that
+can use only IPv4 addresses, while PF_INET6 creates an endpoint that
+can use both IPv6 and IPv4 addresses.</t>
+</section>
+<section title='bind()'>
+<t>Applications use bind() to specify with which local address and port
+the QUIC endpoint should associate itself.</t>
+<t>The function prototype of bind() is</t>
+<sourcecode type="language C">
+int bind(int sd,
+         struct sockaddr *addr,
+         socklen_t addrlen);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor returned by socket().</li>
+<li>addr:  The address structure (struct sockaddr_in for an IPv4 address
+or struct sockaddr_in6 for an IPv6 address; see <xref target='RFC3493'/>).
+</li>
+<li>addrlen:  The size of the address structure.</li>
+</ul>
+<t>bind() returns 0 on success and -1 in case of an error.</t>
+<t>Applications cannot call bind() multiple times to associate multiple
+addresses to an endpoint.  After the first call to bind(), all
+subsequent calls will return an error.</t>
+<t>Multiple applications can bind() to the same address and the same
+port, and share the same lower UDP socket.</t>
+<t>The IP address part of addr can be specified as a wildcard (INADDR_ANY
+for an IPv4 address, or as IN6ADDR_ANY_INIT or in6addr_any for an IPv6
+address. It will return an error if the IPv4 sin_port or IPv6 sin6_port
+is set to 0.</t>
+<t>If bind() is not called prior to connect() on client, the system picks
+an ephemeral port to bind in conenct().</t>
+<t>The completion of this bind() process does not allow the QUIC
+endpoint to accept inbound QUIC association requests on server. Until a
+listen() system call, described below, is performed on the socket. </t>
+</section>
+<section title='listen()'>
+<t>An application uses listen() to mark a socket as being able to accept
+new associations.</t>
+<t>The function prototype is</t>
+<sourcecode type="language C">
+int listen(int sd,
+           int backlog);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor of the endpoint.</li>
+<li>backlog:  If backlog is non-zero, enable listening, else disable
+listening.</li>
+</ul>
+<t>listen() returns 0 on success and -1 in case of an error.</t>
+<t>Multiple applications binding to the same address and the same port
+must enable SO_REUSEPORT socket option for each socket before calling
+listen(). These listen sockets will be grouped so that incoming
+connections will be able to select the socket according to ALPN or
+with other selectors. </t>
+</section>
+<section title='accept()'>
+<t>Applications use the accept() call to remove an established QUIC
+association from the accept queue of the endpoint.  A new socket
+descriptor will be returned from accept() to represent the newly
+formed connection.</t>
+<t>The function prototype is</t>
+<sourcecode type="language C">
+int accept(int sd,
+           struct sockaddr *addr,
+           socklen_t *addrlen);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor of the endpoint.</li>
+<li>addr:  The address structure (struct sockaddr_in for an IPv4 address
+or struct sockaddr_in6 for an IPv6 address; see <xref target='RFC3542'/>).
+</li>
+<li>addrlen:  The size of the address structure.</li>
+</ul>
+<t>The function returns the socket descriptor for the newly formed
+connection on success and -1 in case of an error.</t>
+<t>Note that the incoming Client Initial packet wakes the accept() up,
+and the TLS message carried by the Client Initial packet will queue up
+in the receive queue of the socket returned by accept(). Then it will
+be received by userspace via the socket returned by accept() so that
+the TLS message can be exchanged in userspace.</t>
+</section>
+<section title='connect()'>
+<t>Applications use connect() to do routing and then find the proper
+source address and port to bind if bind() is not called, it also
+initializes the connection ID and installs initial keys to prepare
+for handshake.</t>
+<t>The function prototype is</t>
+<sourcecode type="language C">
+int connect(int sd,
+            const struct sockaddr *addr,
+            socklen_t addrlen);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor of the endpoint.</li>
+<li>addr:  The address structure (struct sockaddr_in for an IPv4 address
+or struct sockaddr_in6 for an IPv6 address; see <xref target='RFC3542'/>).
+</li>
+<li>addrlen:  The size of the address structure.</li>
+</ul>
+<t>connect() returns 0 on success and -1 on error.</t>
+<t>connect() MUST be called before sending any handshake message.</t>
+</section>
+<section title='close()'>
+<t>Applications use close() to gracefully close down an association.</t>
+<t>The function prototype is</t>
+<sourcecode type="language C">
+int close(int sd);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor of the association to be closed.</li>
+</ul>
+<t>close() returns 0 on success and -1 in case of an error.</t>
+<t>After an application calls close() on a socket descriptor, no further
+socket operations will succeed on that descriptor.</t>
+<t>close() will send CLOSE frame to peer, the close information can be
+set via QUIC_SOCKOPT_CONNECTION_CLOSE socket option before calling close(),
+see <xref target='sockopt_close' />.</t>
+</section>
+<section title='shutdown()'>
+<t>QUIC differs from TCP in that it does not have half close semantics.</t>
+<t>The function prototypes are</t>
+<sourcecode type="language C">
+int shutdown(int sd,
+             int how);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor of the association to be closed.</li>
+<li>how:  Specifies the type of shutdown. 1. SHUT_RD:  Disables further
+receive operations, the socket state is set to closed. 2. SHUT_WR:
+Disables further send operations, after sending CLOSE frame, the socket
+state is set to closed. 3. SHUT_RDWR: similar to SHUT_WR.</li>
+</ul>
+<t>shutdown() returns 0 on success and -1 in case of an error.</t>
+<t>Note that users can use SHUT_WR to send close frame multiple times.</t>
+</section>
+<section title='sendmsg() and recvmsg()'>
+<t>An application uses the sendmsg() and recvmsg() calls to transmit
+data to and receive data from its peer.</t>
+<t>The function prototypes are</t>
+<sourcecode type="language C">
+ssize_t sendmsg(int sd,
+                const struct msghdr *message,
+                int flags);
+ssize_t recvmsg(int sd,
+                struct msghdr *message,
+                int flags);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor of the endpoint.</li>
+<li>message:  Pointer to the msghdr structure that contains a single user
+message and possibly some ancillary data. See <xref target='struct' />
+for a complete description of the data structures.</li>
+<li>flags:  No new flags are defined for QUIC at this level. See
+<xref target='struct' /> for QUIC-specific flags used in the
+msghdr structure.</li>
+</ul>
+<t>sendmsg() returns the number of bytes accepted by the kernel or -1 in
+case of an error.  recvmsg() returns the number of bytes received or
+-1 in case of an error.</t>
+<t>As described in <xref target='struct' />, different types of ancillary
+data can be sent and received along with user data.</t>
+<t>During Handshake, users can use sendmsg() and recvmsg() with Handshake
+msg_control <xref target='struct_handshake' /> to send raw TLS messages to
+and receive from kernel and exchange TLS messages in userspace with the
+help of third-party TLS library like gnutls.</t>
+<t>Two pairs of high level APIs are defined to wrap the handshake process
+in userspace, see <xref target='advanced_handshake' /> and
+<xref target='advanced_handshake_parms' />.</t>
+<t>Post Handshake, users can use sendmsg() and recvmsg() with Stream
+msg_control <xref target='struct_stream' /> to send data msgs to and
+receive from kernel with stream_id and stream_flags.</t>
+<t>One pair of high level APIs are defined to wrap the stream msg_control,
+see <xref target='advanced_stream' />.</t>
+</section>
+<section title='send(), recv(), read() and write()'>
+<t>Applications can use send() and recv() to transmit data to the peer and
+receive data from the peer with basic access.</t>
+<t>The function prototypes are</t>
+<sourcecode type="language C">
+ssize_t send(int sd,
+             const void *msg,
+             size_t len,
+             int flags);
+ssize_t recv(int sd,
+             void *buf,
+             size_t len,
+             int flags);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor of the endpoint.</li>
+<li>msg:  The message to be sent.</li>
+<li>len:  The size of the message or the size of the buffer.</li>
+<li>flags:  (described below).</li>
+</ul>
+<t>send() returns the number of bytes accepted by the kernel or -1 in
+case of an error.  recv() returns the number of bytes received or
+-1 in case of an error.</t>
+<t>Since ancillary data (msg_control field) can NOT be used, the flags
+will work as stream_flags, and the latest opened stream will always be
+used as stream_id. see <xref target='struct_msghdr' /></t>
+<t>send() and recv() can not be used to transmit and receive TLS messages
+as without ancillary data Handshake Information can be carried.</t>
+<t>Applications can use read() and write() to receive and send data from
+and to a peer. They have the same semantics as recv() and send() but less
+access, as the flags parameter cannot be used. </t>
+</section>
+<section title='setsockopt() and getsockopt()'>
+<t>Applications use setsockopt() and getsockopt() to set or retrieve
+socket options.  Socket options are used to change the default
+behavior of socket calls.  They are described in <xref target='sockopt' />
+.</t>
+<t>The function prototypes are</t>
+<sourcecode type="language C">
+int getsockopt(int sd,
+               int level,
+               int optname,
+               void *optval,
+               socklen_t *optlen);
+int setsockopt(int sd,
+               int level,
+               int optname,
+               const void *optval,
+               socklen_t optlen);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor.</li>
+<li>level:  Set to SOL_QUIC for all QUIC options.</li>
+<li>optname:  The option name.</li>
+<li>optval:  The buffer to store the value of the option.</li>
+<li>optlen:  The size of the buffer (or the length of the option
+returned).</li>
+</ul>
+<t>These functions return 0 on success and -1 in case of an error.</t>
+</section>
+<section title='getsockname() and getpeername()'>
+<t>Applications use getsockname() to retrieve the locally bound socket
+address of the specified socket and use getpeername() to retrieve the
+peer socket address. They are especially useful when connection migration
+occurs while the corresponding event is not enabled.</t>
+<t>The function prototypes are</t>
+<sourcecode type="language C">
+int getsockname(int sd,
+                struct sockaddr *address,
+                socklen_t *len);
+int getpeername(int sd,
+                struct sockaddr *address,
+                socklen_t *len);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor to be queried.</li>
+<li>address:  On return, one locally bound or peer address (chosen by the
+QUIC stack) is stored in this buffer.  If the socket is an IPv4 socket,
+the address will be IPv4.  If the socket is an IPv6 socket, the
+address will be either an IPv6 or IPv4 address..</li>
+<li>len:  The caller should set the length of the address here.  On
+return, this is set to the length of the returned address.</li>
+</ul>
+<t>These functions return 0 on success and -1 in case of an error.</t>
+<t>If the actual length of the address is greater than the length of the
+supplied sockaddr structure, the stored address will be truncated.</t>
+</section>
+</section>
+
+<section title='Advanced Operation'>
+<section title='quic_sendmsg() and quic_recvmsg()' anchor='advanced_stream'>
+<t>An application uses the quic_sendmsg() and quic_recvmsg() calls to
+transmit data to and receive data from its peer with stream_id and
+stream_flags.</t>
+<t>The function prototypes are</t>
+<sourcecode type="language C">
+ssize_t quic_sendmsg(int sd,
+                     const void *msg,
+                     size_t len,
+                     uint64_t sid,
+                     uint32_t flags);
+ssize_t quic_recvmsg(int sd,
+                     void *msg,
+                     size_t len,
+                     uint64_t *sid,
+                     uint32_t *flags);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor.</li>
+<li>msg:  The message buffer to be filled.</li>
+<li>len:  The length of the message buffer.</li>
+<li>sid:  stream_id to point for sending or to get for receiving.</li>
+<li>flags:  stream_flags to point for sending or to get for receiving.</li>
+</ul>
+<t>quic_sendmsg() returns the number of bytes accepted by the kernel or -1
+in case of an error.  quic_recvmsg() returns the number of bytes received
+or -1 in case of an error.</t>
+<t>These functions wrap the sendmsg() and recvmsg() with Stream information
+msg_control. </t>
+</section>
+<section title='quic_client/server_handshake()' anchor='advanced_handshake'>
+<t>An application uses quic_client_handshake() or quic_server_handshake()
+to start a QUIC handshake with Certificate or PSK mode from client or
+server side.</t>
+<t>The function prototypes are</t>
+<sourcecode type="language C">
+int quic_server_handshake(int sd,
+                          char *pkey_file,
+                          char *cert_file);
+int quic_client_handshake(int sd,
+                          char *pkey_file,
+                          char *cert_file);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor.</li>
+<li>pkey_file: private key file or pre-shared key file.</li>
+<li>cert_file: certificate file or null.</li>
+</ul>
+<t>These functions return 0 for success and errcode in case of an error.</t>
+<t>These functions use the sendmsg() and recvmsg() with Handshake
+information msg_control to send and receive raw TLS messages from or
+to kernel and exchange them in userspace via TLS library like gnutls.
+Meanwhile, they use some socket options to get necessary information
+like Transport Parameters from kernel to build TLS messages, and set
+secrets derived for different levels to kernel for QUIC packets
+encryption and decryption.</t>
+</section>
+<section title='quic_client/server_handshake_parms()' anchor='advanced_handshake_parms'>
+<t>An application uses quic_client_handshake_parms() or
+quic_server_handshake_parms() to start a QUIC handshake from client or
+server side with more detailed TLS Handshake Parameters.</t>
+<t>The function prototypes are</t>
+<sourcecode type="language C">
+struct quic_handshake_parms {
+  uint32_t          timeout;
+  gnutls_privkey_t  privkey;
+  gnutls_pcert_st   *cert;
+  char              *peername;
+  char              *names[10];
+  gnutls_datum_t    keys[10];
+  uint32_t          num_keys;
+};
+int quic_client_handshake_parms(int sd,
+                                struct quic_handshake_parms *parms);
+int quic_server_handshake_parms(int sd,
+                                struct quic_handshake_parms *parms);
+</sourcecode>
+<t>and the arguments are</t>
+<ul>
+<li>sd:  The socket descriptor.</li>
+<li>parms:  more TLS Handshake Parameters. 1. timeout: handshake timeout
+in milliseconds. 2. privkey: private key for x509 handshake. 3. cert:
+certificate for x509 handshake. 4. peername: server name for client side
+x509 handshake or psk identity name chosen during PSK handshake. 5.
+names[]: psk identifies in PSK handshake. 6. keys[]: psk keys in PSK
+handshake, or certificates received in x509 handshake. 7. num_keys:
+keys total numbers.</li>
+</ul>
+<t>These functions return 0 for success and errcode in case of an error.</t>
+<t>These functions are useful when adapting to the other userland QUIC
+handshake tools like ktls-utils.</t>
+</section>
+</section>
+</section>
+
+
+<section title='Data Structures' anchor="struct">
+<t>This section discusses important data structures that are specific to
+QUIC and are used with sendmsg() and recvmsg() calls to control QUIC
+endpoint operations and to access ancillary information and
+notifications.</t>
+<section title='The msghdr and cmsghdr Structures' anchor="struct_msghdr">
+<t>The msghdr structure used in the sendmsg() and recvmsg() calls, as
+well as the ancillary data carried in the structure, is the key for
+the application to set and get various control information from the
+QUIC endpoint.</t>
+<t>The msghdr and the related cmsghdr structures are defined and
+discussed in detail in <xref target='RFC3542'/>.  They are defined as</t>
+<sourcecode type="language C">
+struct msghdr {
+  void *msg_name;           /* ptr to socket address structure */
+  socklen_t msg_namelen;    /* size of socket address structure */
+  struct iovec *msg_iov;    /* scatter/gather array */
+  int msg_iovlen;           /* # elements in msg_iov */
+  void *msg_control;        /* ancillary data */
+  socklen_t msg_controllen; /* ancillary data buffer length */
+  int msg_flags;            /* flags on message */
+};
+
+struct cmsghdr {
+  socklen_t cmsg_len; /* # bytes, including this header */
+  int cmsg_level;     /* originating protocol */
+  int cmsg_type;      /* protocol-specific type */
+                      /* followed by unsigned char cmsg_data[]; */
+};
+</sourcecode>
+<t>The msg_name is not used when sending a message with sendmsg().</t>
+<t>The scatter/gather buffers, or I/O vectors (pointed to by the msg_iov
+field) are treated by QUIC as a single user message for both sendmsg()
+and recvmsg().</t>
+<t>The QUIC stack uses the ancillary data (msg_control field) to
+communicate the attributes, such as QUIC_STREAM_INFO, of the message
+stored in msg_iov to the socket endpoint.  The different ancillary
+data types are described in <xref target='control_struct' />.</t>
+<t>On send side, msg_flags is used if QUIC_STREAM_INFO msg_control is not
+used, msg_flags works as the stream_flags in QUIC_STREAM_INFO msg_control.</t>
+<ul>
+<li>MSG_SYN: equals QUIC_STREAM_FLAG_NEW in stream_flags</li>
+<li>MSG_FIN: equals QUIC_STREAM_FLAG_FIN</li>
+<li>MSG_DONTWAIT: equals QUIC_STREAM_FLAG_ASYNC</li>
+<li>MSG_STREAM_UNI: equals QUIC_STREAM_FLAG_UNI</li>
+<li>MSG_DATAGRAM: equals QUIC_STREAM_FLAG_NOTIFICATION</li>
+</ul>
+<t>On receive side, msg_flags is always set</t>
+<ul>
+<li>MSG_EOR: equals QUIC_STREAM_FLAG_FIN in stream_flags</li>
+<li>MSG_PEEK</li>
+<li>MSG_DONTWAIT</li>
+<li>MSG_NOTIFICATION: equals QUIC_STREAM_FLAG_NOTIFICATION</li>
+<li>MSG_DATAGRAM: equals QUIC_STREAM_FLAG_NOTIFICATION</li>
+</ul>
+<t>This means users can send/receive stream data without QUIC_STREAM_INFO
+msg_control. However, as stream_id will be pointed/passed, the latest
+opened stream will always be used, and MSG_SYN flag will be used to open
+the next available stream. Therefore, if a user wants to operate multiple
+streams at the same time, QUIC_STREAM_INFO msg_control must be used.</t>
+</section>
+
+<section title='Ancillary Data Considerations and Semantics'>
+<t>Programming with ancillary socket data (msg_control) contains some
+subtleties and pitfalls, which are discussed below.</t>
+<section title='Multiple Items and Ordering'>
+<t>Multiple ancillary data items may be included in any call to
+sendmsg() or recvmsg(); these may include multiple QUIC items,
+non-QUIC items (such as IP-level items), or both.</t>
+<t>The ordering of ancillary data items (either by QUIC or another
+protocol) is not significant and is implementation dependent, so
+applications must not depend on any ordering.</t>
+<t>QUIC_STREAM_INFO and QUIC_HANDSHAKE_INFO type ancillary data always
+corresponds to the data in the msghdr's msg_iov member.  There can be
+only one such type of ancillary data for each sendmsg() or recvmsg()
+call.</t>
+</section>
+<section title='Accessing and Manipulating Ancillary Data'>
+<t>Applications can infer the presence of data or ancillary data by
+examining the msg_iovlen and msg_controllen msghdr members,
+respectively</t>
+<t>Implementations may have different padding requirements for ancillary
+data, so portable applications should make use of the macros
+CMSG_FIRSTHDR, CMSG_NXTHDR, CMSG_DATA, CMSG_SPACE, and CMSG_LEN.  See
+<xref target='RFC3542'/> for more information. The following is an example,
+from <xref target='RFC3542'/>, demonstrating the use of these macros to
+access ancillary data</t>
+<sourcecode type="language C">
+struct msghdr msg;
+struct cmsghdr *cmsgptr;
+
+/* fill in msg */
+
+/* call recvmsg() */
+
+for (cmsgptr = CMSG_FIRSTHDR(&amp;msg); cmsgptr != NULL;
+     cmsgptr = CMSG_NXTHDR(&amp;msg, cmsgptr)) {
+  if (cmsgptr->cmsg_len == 0) {
+     /* Error handling */
+     break;
+  }
+  if (cmsgptr->cmsg_level == ... &amp;&amp; cmsgptr->cmsg_type == ... ) {
+    u_char  *ptr;
+
+    ptr = CMSG_DATA(cmsgptr);
+    /* process data pointed to by ptr */
+  }
+}
+</sourcecode>
+</section>
+<section title='Control Message Buffer Sizing'>
+<t>The information conveyed via QUIC_STREAM_INFO and QUIC_HANDSHAKE_INFO
+ancillary data will often be fundamental to the correct and sane
+operation of the sockets application. For example, if an application
+needs to send and receive data on different QUIC streams, QUIC_STREAM_INFO
+ancillary data is indispensable.</t>
+<t>Given that some ancillary data is critical, and that multiple
+ancillary data items may appear in any order, applications should be
+carefully written to always provide a large enough buffer to contain
+all possible ancillary data that can be presented by recvmsg().  If
+the buffer is too small, and crucial data is truncated, it may pose a
+fatal error condition.</t>
+<t>Thus, it is essential that applications be able to deterministically
+calculate the maximum required buffer size to pass to recvmsg().  One
+constraint imposed on this specification that makes this possible is
+that all ancillary data definitions are of a fixed length.  One way
+to calculate the maximum required buffer size might be to take the
+sum of the sizes of all enabled ancillary data item structures, as
+calculated by CMSG_SPACE.  For example, if we enabled QUIC_STREAM_INFO
+and IPV6_RECVPKTINFO <xref target='RFC3542'/>, we would calculate and
+allocate the buffer size as follows</t>
+<sourcecode type="language C">
+size_t total;
+void *buf;
+
+total = CMSG_SPACE(sizeof(struct quic_stream_info)) +
+        CMSG_SPACE(sizeof(struct in6_pktinfo));
+
+buf = malloc(total);
+</sourcecode>
+<t>We could then use this buffer (buf) for msg_control on each call to
+recvmsg() and be assured that we would not lose any ancillary data to
+truncation.</t>
+</section>
+</section>
+
+<section title='QUIC msg_control Structures' anchor='control_struct'>
+<section title='Stream Information' anchor='struct_stream'>
+<t>This cmsg specifies QUIC options for sendmsg() and describes QUIC
+header information about a received message through recvmsg() with
+struct quic_stream_info.</t>
+<sourcecode type="language C">
+struct quic_stream_info {
+  uint64_t stream_id;
+  uint32_t stream_flag;
+};
+</sourcecode>
+<t>For stream_id, the first 2 bits are for the stream type for sending or
+receiving</t>
+<ul>
+<li>QUIC_STREAM_TYPE_SERVER_MASK: 0x1, server-side stream</li>
+<li>QUIC_STREAM_TYPE_UNI_MASK: 0x2, unidirectional stream</li>
+</ul>
+<t>For stream_flag on send side</t>
+<ul>
+<li>QUIC_STREAM_FLAG_NEW: open a stream and send the first data</li>
+<li>QUIC_STREAM_FLAG_FIN: send the last data and close a stream</li>
+<li>QUIC_STREAM_FLAG_DATAGRAM: send data as datagram</li>
+</ul>
+<t>For stream_flag on receive side</t>
+<ul>
+<li>QUIC_STREAM_FLAG_NOTIFICATION: data received is an event</li>
+<li>QUIC_STREAM_FLAG_FIN: data received is the last one for this stream</li>
+<li>QUIC_STREAM_FLAG_DATAGRAM: data received is datagram</li>
+</ul>
+</section>
+<section title='Handshake Information' anchor='struct_handshake'>
+<t>This cmsg provides information for sending and receiving handshake/TLS
+messages via sendmsg() or recvmsg() with struct quic_handshake_info.</t>
+<sourcecode type="language C">
+struct quic_handshake_info {
+  uint8_t crypto_level;
+};
+</sourcecode>
+<t>crypto_level includes these levels</t>
+<sourcecode type="language C">
+enum quic_crypto_level {
+  QUIC_CRYPTO_APP,
+  QUIC_CRYPTO_INITIAL,
+  QUIC_CRYPTO_HANDSHAKE,
+  QUIC_CRYPTO_EARLY,
+};
+</sourcecode>
+<t>So this cmsg is only used inside handshake APIs.</t>
+</section>
+</section>
+</section>
+
+
+<section title='QUIC Events and Notifications'>
+<t>An QUIC application may need to understand and process events and errors
+that happen on the QUIC stack. These events include stream updates and
+max_streams, connection close and migration, key updates, new token.</t>
+<sourcecode type="language C">
+enum quic_event_type {
+  QUIC_EVENT_NONE,
+  QUIC_EVENT_STREAM_UPDATE,
+  QUIC_EVENT_STREAM_MAX_STREAM,
+  QUIC_EVENT_CONNECTION_CLOSE,
+  QUIC_EVENT_CONNECTION_MIGRATION,
+  QUIC_EVENT_KEY_UPDATE,
+  QUIC_EVENT_NEW_TOKEN,
+};
+</sourcecode>
+<t>When a notification arrives, recvmsg() returns the notification in the
+application-supplied data buffer via msg_iov, and sets MSG_NOTIFICATION
+in msg_flags of msghdr and QUIC_STREAM_FLAG_NOTIFICATION in stream_flags
+of cmsg quic_stream_info in <xref target='struct_stream' /></t>
+<t>See socket option <xref target='sockopt_event' /> for the event enabling.</t>
+<section title='QUIC Notification Structure' anchor='notification'>
+<section title='QUIC_EVENT_STREAM_UPDATE'>
+<t>Only the notification with one of these states is sent to userspace</t>
+<ul>
+<li>QUIC_STREAM_SEND_STATE_RECVD</li>
+<li>QUIC_STREAM_SEND_STATE_RESET_SENT: update is sent only if STOP_SENDING
+is received</li>
+<li>QUIC_STREAM_SEND_STATE_RESET_RECVD</li>
+<li>QUIC_STREAM_RECV_STATE_RECV: update is sent only when the last frag
+hasn't arrived.</li>
+<li>QUIC_STREAM_RECV_STATE_SIZE_KNOWN: update is sent only if data comes
+out of order</li>
+<li>QUIC_STREAM_RECV_STATE_RECVD</li>
+<li>QUIC_STREAM_RECV_STATE_RESET_RECVD</li>
+</ul>
+<t>Data format in the event</t>
+<sourcecode type="language C">
+struct quic_stream_update {
+  uint64_t id;
+  uint32_t state;
+  uint32_t errcode;
+  uint64_t finalsz;
+};
+</sourcecode>
+</section>
+<section title='QUIC_EVENT_STREAM_MAX_STREAM'>
+<t>This notification is sent when max_streams frame is received, and this
+is useful when using QUIC_STREAM_FLAG_ASYNC to open a stream whose id
+exceeds the max stream count. After receiving this notification, try to
+open this stream again.</t>
+<t>Data format in the event</t>
+<sourcecode type="language C">
+uint64_t max_stream;
+</sourcecode>
+</section>
+<section title='QUIC_EVENT_CONNECTION_CLOSE'>
+<t>This notification is sent when receiving a close frame from peer where
+it can set the close info with <xref target='sockopt_close' /> socket
+option.</t>
+<t>Data format in the event</t>
+<sourcecode type="language C">
+struct quic_connection_close {
+  uint32_t errcode;
+  uint8_t frame;
+  uint8_t phrase[];
+};
+</sourcecode>
+</section>
+<section title='QUIC_EVENT_CONNECTION_MIGRATION'>
+<t>This notification is sent when either side successfully changes its
+source address by <xref target='sockopt_migration' /> socket option or
+dest address by peer's CONNECTION_MIGRATION. The parameter tells you if
+it is a local or peer CONNECTION_MIGRATION, and then you can get the
+new address with getsockname() or getpeername(). </t>
+<t>Data format in the event</t>
+<sourcecode type="language C">
+uint8_t local_migration;
+</sourcecode>
+</section>
+<section title='QUIC_EVENT_KEY_UPDATE'>
+<t>This notification is sent when both sides have used the new key after
+key update, and the parameter tells you which the new key phase is</t>
+<t>Data format in the event</t>
+<sourcecode type="language C">
+uint8_t key_update_phase;
+</sourcecode>
+</section>
+<section title='QUIC_EVENT_NEW_TOKEN' anchor='event_new_token'>
+<t>Since the handshake is in userspace, this notification is sent whenever
+the frame of NEW_TOKEN is received from the peer where it can send these
+frame via <xref target='sockopt_new_token' /> socket option.</t>
+<t>Data format in the event</t>
+<sourcecode type="language C">
+uint8_t *token;
+</sourcecode>
+</section>
+</section>
+
+<section title='Notification Interest Options'>
+<section title='QUIC_SOCKOPT_EVENT Option' anchor='sockopt_event'>
+<t>This option is used to enable or disable one type of event or notification.</t>
+<t>the optval type is</t>
+<sourcecode type="language C">
+struct quic_event_option {
+  uint8_t type;
+  uint8_t on;
+};
+</sourcecode>
+<t>type is defined on <xref target='notification' />.</t>
+<t>on can be set to</t>
+<ul>
+<li>0: disable.</li>
+<li>!0: enable.</li>
+</ul>
+<t>all events are disabled by default.</t>
+</section>
+</section>
+</section>
+
+
+<section title='Socket Options' anchor='sockopt'>
+<section title='Read/Write Options'>
+<section title='QUIC_SOCKOPT_EVENT'>
+<t>This socket option is used to set a specific notification option.
+Please see <xref target='sockopt_event' /> for a full description of this option and
+its usage.</t>
+</section>
+<section title='QUIC_SOCKOPT_CONNECTION_CLOSE' anchor='sockopt_close'>
+<t>This option is used to get or get the close context, which includes errcode
+and phrase and frame. On close side, set it before calling close() to tell peer
+the closing info, while on being closed side get it to show the peer closing info.</t>
+<t>the optval type is</t>
+<sourcecode type="language C">
+struct quic_connection_close {
+  uint32_t errcode;
+  uint8_t frame;
+  uint8_t phrase[];
+};
+</sourcecode>
+<t>errcode is Application Protocol Error Code left to application protocols.</t>
+<t>phrase is a string to describe more details.</t>
+<t>frame is the frame type that caused the closing.</t>
+<t>All three are 0 or null by default.</t>
+</section>
+<section title='QUIC_SOCKOPT_TRANSPORT_PARAM'>
+<t>This option is used to configure the transport parameters, including not only
+the quic original transport param, but also some handshake options.</t>
+<t>the optval type is</t>
+<sourcecode type="language C">
+struct quic_transport_param {
+  uint8_t         remote;
+  uint8_t         disable_active_migration; (0 by default)
+  uint8_t         grease_quic_bit; (0)
+  uint8_t         stateless_reset; (0)
+  uint8_t         disable_1rtt_encryption; (0)
+  uint8_t         disable_compatible_version; (0)
+  uint64_t        max_udp_payload_size; (65527)
+  uint64_t        ack_delay_exponent; (3)
+  uint64_t        max_ack_delay; (25000)
+  uint64_t        active_connection_id_limit; (7)
+  uint64_t        max_idle_timeout; (30000000 us)
+  uint64_t        max_datagram_frame_size; (0)
+  uint64_t        max_data; (sk_rcvbuf / 2)
+  uint64_t        max_stream_data_bidi_local; (sk_rcvbuf / 4)
+  uint64_t        max_stream_data_bidi_remote; (sk_rcvbuf / 4)
+  uint64_t        max_stream_data_uni; (sk_rcvbuf / 4)
+  uint64_t        max_streams_bidi; (100)
+  uint64_t        max_streams_uni; (100)
+  uint64_t        initial_smoothed_rtt; (333000)
+
+  uint32_t        plpmtud_probe_timeout; (0)
+  uint8_t         validate_peer_address; (0)
+  uint8_t         receive_session_ticket; (0)
+  uint8_t         certificate_request; (0)
+  uint8_t         congestion_control_alg; (QUIC_CONG_ALG_RENO)
+  uint32_t        payload_cipher_type; (0)
+  uint32_t        version; (QUIC_VERSION_V1)
+};
+</sourcecode>
+<t>These members in the 1st group are from <xref target='RFC9000'/>,
+and the members in the 2nd group are</t>
+<t>plpmtud_probe_timeout is in usec, 0: disabled.</t>
+<t>validate_peer_address is for server only, send retry packet and verify token.</t>
+<t>receive_session_ticket is for client only, handshake is done until ticket is received</t>
+<t>certificate_request is for server only, and can be set to</t>
+<ul>
+<li>0: IGNORE</li>
+<li>1: REQUEST</li>
+<li>2: REQUIRE</li>
+</ul>
+<t>congestion_control_alg is congestion control algorithm</t>
+<t>payload_cipher_type can be set to</t>
+<ul>
+<li>AES_GCM_128</li>
+<li>AES_GCM_256</li>
+<li>AES_CCM_128</li>
+<li>CHACHA20_POLY1305</li>
+</ul>
+<t>version can be set to</t>
+<ul>
+<li>QUIC_VERSION_V1</li>
+<li>QUIC_VERSION_V2</li>
+</ul>
+<t>The default values are inline the struct code.</t>
+<t>Note 'remote' member allows users to set remote transport parameter.
+Together with the session resumption ticket, it is used to set the remote
+transport parameter from last connection before sending 0-RTT DATA.</t>
+</section>
+<section title='QUIC_SOCKOPT_TOKEN' anchor='sockopt_new_token'>
+<t>On Client this option is used to set regular token, which is used for
+the peer server's address verification. The token is usually issued by
+peer from the last connection and got via setsockopt with this option or
+<xref target='event_new_token' /> event.</t>
+<t>On Server this option is used to issue the token to Client for the
+next connection's address verification.</t>
+<t>On Client the optval type is</t>
+<sourcecode type="language C">
+uint8_t *opt;
+</sourcecode>
+<t>On Server the optval type is NULL.</t>
+<t>The default value in socket is NULL.</t>
+</section>
+<section title='QUIC_SOCKOPT_ALPN'>
+<t>This option is used to set or get the Application-Layer Protocol
+Negotiation before handshake, multiple ALPNs are separated by ','
+e.g. "smbd, h3, ksmbd".</t>
+<t>On server side, during handshake it gets ALPN via this socket option
+and matches the ALPN from the client side, and then sets the matched ALPN
+to the socket, so that users can get the selected ALPN via this socket
+option after handshake.</t>
+<t>The optval type is</t>
+<sourcecode type="language C">
+char *alpn;
+</sourcecode>
+<t>The default value in socket is NULL.</t>
+</section>
+<section title='QUIC_SOCKOPT_SESSION_TICKET'>
+<t>This option is used to set session resumption ticket on Client, which
+is used for session resumption. The ticket is usually issued by peer from
+the last connection and got via setsockopt with this option.</t>
+<t>On client the optval type is</t>
+<sourcecode type="language C">
+uint8_t *opt;
+</sourcecode>
+<t>On Server the optval type is NULL.</t>
+<t>The default value in socket is NULL.</t>
+</section>
+<section title='QUIC_SOCKOPT_CRYPTO_SECRET'>
+<t>This option is used to set the secret (not keys) derived from the
+userspace to kernel socket during the handshake.</t>
+<t>On Client the optval type is</t>
+<sourcecode type="language C">
+struct quic_crypto_secret {
+  uint8_t level;
+  uint16_t send;
+  uint32_t type;
+  uint8_t secret[48];
+};
+</sourcecode>
+<t>level can be set to</t>
+<ul>
+<li>QUIC_CRYPTO_APP: set secret for application level</li>
+<li>QUIC_CRYPTO_HANDSHAKE: set secret for handshake level</li>
+<li>QUIC_CRYPTO_EARLY: set secret for early/0rtt level</li>
+</ul>
+<t>send can be set to</t>
+<ul>
+<li>0: set secret for receive.</li>
+<li>!0: set secret for send.</li>
+</ul>
+<t>type can be set to</t>
+<ul>
+<li>AES_GCM_128</li>
+<li>AES_GCM_256</li>
+<li>AES_CCM_128</li>
+<li>CHACHA20_POLY1305</li>
+</ul>
+<t>secret is the key meterial to set and the length depends on type</t>
+<t>This option is only used for doing handshake.</t>
+</section>
+<section title='QUIC_SOCKOPT_TRANSPORT_PARAM_EXT'>
+<t>This option is used to get the QUIC Transport Extension from kernel
+to build the TLS message and set the QUIC Transport Extension from the
+TLS message received from the peer.</t>
+<sourcecode type="language C">
+uint8_t *opt;
+</sourcecode>
+<t>This option is only used for doing handshake.</t>
+</section>
+</section>
+
+<section title='Read-Only Options'>
+<section title='QUIC_SOCKOPT_STREAM_OPEN'>
+<t>This option is used to open a stream.</t>
+<t>the optval type is</t>
+<sourcecode type="language C">
+struct quic_stream_info {
+  uint64_t stream_id;
+  uint32_t stream_flag;
+};
+</sourcecode>
+<t>stream_id can be set to</t>
+<ul>
+<li>>= 0: open a stream with a specific stream id.</li>
+<li>-1:  open next available stream and return the stream id to users via stream_id.</li>
+</ul>
+<t>stream_flag can be set to</t>
+<ul>
+<li>QUIC_STREAM_FLAG_UNI: open the next unidirectional stream.</li>
+<li>QUIC_STREAM_FLAG_ASYNC: open the stream without block</li>
+</ul>
+</section>
+</section>
+
+<section title='Write-Only Options'>
+<section title='QUIC_SOCKOPT_STREAM_RESET'>
+<t>This option is used to reset a stream and it means that the endpoint
+will not guarantee delivery of stream data.</t>
+<t>the optval type is</t>
+<sourcecode type="language C">
+struct quic_errinfo {
+  uint64_t stream_id;
+  uint32_t errcode;
+};
+</sourcecode>
+<t>errcode is Application Protocol Error Code left to application protocols.</t>
+</section>
+<section title='QUIC_SOCKOPT_STREAM_STOP_SENDING'>
+<t>This option is used to request that a peer cease transmission on a
+stream.</t>
+<t>the optval type is</t>
+<sourcecode type="language C">
+struct quic_errinfo {
+  uint64_t stream_id;
+  uint32_t errcode;
+};
+</sourcecode>
+<t>errcode is Application Protocol Error Code left to application protocols.</t>
+</section>
+<section title='QUIC_SOCKOPT_CONNECTION_MIGRATION' anchor='sockopt_migration'>
+<t>This option is used to initiate a connection migration. It can also
+be used to set preferred_address transport param before handshake on
+server side.</t>
+<t>the optval type is</t>
+<sourcecode type="language C">
+struct sockaddr_in(6);
+</sourcecode>
+</section>
+<section title='QUIC_SOCKOPT_KEY_UPDATE'>
+<t>This option is used to initiate a key update or rekeying with the
+optval == NULL </t>
+</section>
+</section>
+</section>
+
+
+<section title='IANA Considerations'>
+<t>No actions from IANA required.</t>
+</section>
+
+
+<section title='Security Considerations'>
+<t>The socket receive buffer SHOULD be adjusted by the local max_data
+from struct quic_transport_param, so the implementation should change
+the socket receive buffer whenever the local transport param max_data
+changes, it may impair performance with socket receive buffer smaller
+than the local transport param max_data.</t>
+<t>The socket send buffer SHOULD also be adjusted by the peer max_data
+of transport param to get the best performance, instead of setting it
+manually.</t>
+<t>The optval size of these sockopt options, QUIC_SOCKOPT_ALPN,
+QUIC_SOCKOPT_TOKEN, QUIC_SOCKOPT_SESSION_TICKET,
+QUIC_SOCKOPT_CONNECTION_CLOSE, must be limited to avoid too much
+memory allocation.</t>
+</section>
+</middle>
+
+
+<back>
+<references title='References'>
+<references title='Normative References'>
+<xi:include href="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.0768.xml"/>
+<xi:include href="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.9000.xml"/>
+<xi:include href="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.9293.xml"/>
+</references>
+
+<references title='Informative References'>
+<xi:include href="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.2119.xml"/>
+<xi:include href="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.3542.xml"/>
+<xi:include href="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.3493.xml"/>
+<xi:include href="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.6458.xml"/>
+</references>
+</references>
+
+
+<section title='Example For Multi-streaming Usage'>
+<t>This example shows how to use quic_sendmsg() and quic_recvmsg() to
+send and receive messages on multiple streams at the same time.</t>
+<sourcecode type="language C">
+#include &lt;sys/socket.h>
+#include &lt;arpa/inet.h>
+#include &lt;string.h>
+#include &lt;unistd.h>
+#include &lt;stdlib.h>
+#include &lt;stdio.h>
+#include &lt;errno.h>
+
+#include &lt;netinet/quic.h>
+
+struct stream {
+    char msg[50];
+    uint32_t len;
+    uint32_t flags;
+};
+
+static int do_client(int argc, char *argv[])
+{
+    struct stream stream[2] = {};
+    struct sockaddr_in ra = {};
+    int ret, sockfd;
+    uint32_t flags;
+    uint64_t sid;
+    char msg[50];
+
+    if (argc &lt; 3) {
+        printf("%s client &lt;PEER ADDR> &lt;PEER PORT>\n", argv[0]);
+        return 0;
+    }
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_QUIC);
+    if (sockfd &lt; 0) {
+        printf("socket create failed\n");
+        return -1;
+    }
+
+    ra.sin_family = AF_INET;
+    ra.sin_port = htons(atoi(argv[3]));
+    inet_pton(AF_INET, argv[2], &amp;ra.sin_addr.s_addr);
+
+    if (connect(sockfd, (struct sockaddr *)&amp;ra, sizeof(ra))) {
+        printf("socket connect failed\n");
+        return -1;
+    }
+
+    if (quic_client_handshake(sockfd, NULL, NULL))
+        return -1;
+
+    /* Open stream 0 and send first data on stream 0 */
+    strcpy(msg, "hello ");
+    sid = 0;
+    flags = QUIC_STREAM_FLAG_NEW;
+    ret = quic_sendmsg(sockfd, msg, strlen(msg), sid, flags);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    stream[sid >> 1].len += ret;
+
+    /* Open stream 2 and send first data on stream 2 */
+    strcpy(msg, "hello quic ");
+    sid = 2;
+    flags = QUIC_STREAM_FLAG_NEW;
+    ret = quic_sendmsg(sockfd, msg, strlen(msg), sid, flags);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    stream[sid >> 1].len += ret;
+
+    /* Send second data on stream 0 */
+    strcpy(msg, "quic ");
+    sid = 0;
+    flags = 0;
+    ret = quic_sendmsg(sockfd, msg, strlen(msg), sid, flags);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    stream[sid >> 1].len += ret;
+
+    /* Send second (last) data on stream 2 */
+    strcpy(msg, "server stream 2!");
+    sid = 2;
+    flags = QUIC_STREAM_FLAG_FIN;
+    ret = quic_sendmsg(sockfd, msg, strlen(msg), sid, flags);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    stream[sid >> 1].len += ret;
+
+    /* Send third (last) data on stream 0 */
+    strcpy(msg, "server stream 0!");
+    sid = 0;
+    flags = QUIC_STREAM_FLAG_FIN;
+    ret = quic_sendmsg(sockfd, msg, strlen(msg), sid, flags);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    stream[sid >> 1].len += ret;
+    sid = 0;
+    printf("send %d, len: %u, sid: %lu\n", ret,
+           stream[sid >> 1].len, sid);
+    sid = 2;
+    printf("send %d, len: %u, sid: %lu\n", ret,
+           stream[sid >> 1].len, sid);
+
+    memset(msg, 0, sizeof(msg));
+    ret = quic_recvmsg(sockfd, msg, sizeof(msg), &amp;sid, &amp;flags);
+    if (ret == -1) {
+        printf("recv error %d %d\n", ret, errno);
+        return 1;
+    }
+    printf("recv: \"%s\", len: %d, sid: %lu\n", msg, ret, sid);
+
+    close(sockfd);
+    return 0;
+}
+
+static int do_server(int argc, char *argv[])
+{
+    struct stream stream[2] = {};
+    struct sockaddr_in sa = {};
+    int listenfd, sockfd, ret;
+    unsigned int addrlen;
+    uint32_t flags;
+    uint64_t sid;
+    char msg[50];
+
+    if (argc &lt; 5) {
+        printf("%s server &lt;LOCAL ADDR> &lt;LOCAL PORT>"
+               "&lt;PRIVATE_KEY_FILE> &lt;CERTIFICATE_FILE>\n", argv[0]);
+        return 0;
+    }
+
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(atoi(argv[3]));
+    inet_pton(AF_INET, argv[2], &amp;sa.sin_addr.s_addr);
+    listenfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_QUIC);
+    if (listenfd &lt; 0) {
+        printf("socket create failed\n");
+        return -1;
+    }
+    if (bind(listenfd, (struct sockaddr *)&amp;sa, sizeof(sa))) {
+        printf("socket bind failed\n");
+        return -1;
+    }
+    if (listen(listenfd, 1)) {
+        printf("socket listen failed\n");
+        return -1;
+    }
+    addrlen = sizeof(sa);
+    sockfd = accept(listenfd, (struct sockaddr *)&amp;sa, &amp;addrlen);
+    if (sockfd &lt; 0) {
+        printf("socket accept failed %d %d\n", errno, sockfd);
+        return -1;
+    }
+
+    if (quic_server_handshake(sockfd, argv[4], argv[5]))
+        return -1;
+
+    while (!(stream[0].flags &amp; QUIC_STREAM_FLAG_FIN) ||
+           !(stream[1].flags &amp; QUIC_STREAM_FLAG_FIN)) {
+        ret = quic_recvmsg(sockfd, msg, sizeof(msg), &amp;sid, &amp;flags);
+        if (ret == -1) {
+            printf("recv error %d %d\n", ret, errno);
+            return 1;
+        }
+        sid >>= 1;
+        memcpy(stream[sid].msg + stream[sid].len, msg, ret);
+        stream[sid].len += ret;
+        stream[sid].flags = flags;
+    }
+    sid = 0;
+    printf("recv: \"%s\", len: %d, sid: %lu\n",
+           stream[sid >> 1].msg, stream[sid >> 1].len, sid);
+    sid = 2;
+    printf("recv: \"%s\", len: %d, sid: %lu\n",
+           stream[sid >> 1].msg, stream[sid >> 1].len, sid);
+
+    strcpy(msg, "hello quic client stream 1!");
+    sid = 1;
+    flags = QUIC_STREAM_FLAG_NEW | QUIC_STREAM_FLAG_FIN;
+    ret = quic_sendmsg(sockfd, msg, strlen(msg), sid, flags);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    printf("send %d, sid: %lu\n", ret, sid);
+
+    close(sockfd);
+    close(listenfd);
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc &lt; 2 || (strcmp(argv[1], "server") &amp;&amp;
+        strcmp(argv[1], "client"))) {
+        printf("%s server|client ...\n", argv[0]);
+        return 0;
+    }
+
+    if (!strcmp(argv[1], "client"))
+        return do_client(argc, argv);
+
+    return do_server(argc, argv);
+}
+</sourcecode>
+</section>
+
+<section title='Example For Session Consumption and 0-RTT transmission'>
+<t>This example shows how to combine socket option QUIC_SOCKOPT_TOKEN,
+QUIC_SOCKOPT_SESSION_TICKET and QUIC_SOCKOPT_TRANSPORT_PARAM to achieve
+Session Consumption and 0-RTT transmission.</t>
+<sourcecode type="language C">
+#include &lt;sys/socket.h>
+#include &lt;arpa/inet.h>
+#include &lt;string.h>
+#include &lt;unistd.h>
+#include &lt;stdlib.h>
+#include &lt;stdio.h>
+#include &lt;errno.h>
+
+#include &lt;netinet/quic.h>
+
+static uint8_t ticket[4096];
+static uint8_t token[256];
+
+static int do_client(int argc, char *argv[])
+{
+    unsigned int ticket_len, param_len, token_len, addr_len;
+    struct quic_transport_param param = {};
+    struct sockaddr_in ra = {}, la = {};
+    int ret, sockfd;
+    char msg[50];
+
+    if (argc &lt; 3) {
+        printf("%s client &lt;PEER ADDR> &lt;PEER PORT>\n", argv[0]);
+        return 0;
+    }
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_QUIC);
+    if (sockfd &lt; 0) {
+        printf("socket create failed\n");
+        return -1;
+    }
+
+    ra.sin_family = AF_INET;
+    ra.sin_port = htons(atoi(argv[3]));
+    inet_pton(AF_INET, argv[2], &amp;ra.sin_addr.s_addr);
+
+    if (connect(sockfd, (struct sockaddr *)&amp;ra, sizeof(ra))) {
+        printf("socket connect failed\n");
+        return -1;
+    }
+
+    param.receive_session_ticket = 1;
+    param_len = sizeof(param);
+    ret = setsockopt(sockfd, SOL_QUIC, QUIC_SOCKOPT_TRANSPORT_PARAM,
+                     &amp;param, param_len);
+    if (ret == -1)
+        return -1;
+
+    if (quic_client_handshake(sockfd, NULL, NULL))
+        return -1;
+
+    /* get ticket and param after handshake (you can save
+     * it somewhere).
+     */
+    ticket_len = sizeof(ticket);
+    ret = getsockopt(sockfd, SOL_QUIC, QUIC_SOCKOPT_SESSION_TICKET,
+                     ticket, &amp;ticket_len);
+    if (ret == -1 || !ticket_len) {
+        printf("socket getsockopt session ticket\n");
+        return -1;
+    }
+
+    param_len = sizeof(param);
+    param.remote = 1;
+    ret = getsockopt(sockfd, SOL_QUIC, QUIC_SOCKOPT_TRANSPORT_PARAM,
+                     &amp;param, &amp;param_len);
+    if (ret == -1) {
+        printf("socket getsockopt remote transport param\n");
+        return -1;
+    }
+
+    /* get token and local address (needed when peer
+     * validate_address is set).
+     */
+    token_len = sizeof(token);
+    ret = getsockopt(sockfd, SOL_QUIC, QUIC_SOCKOPT_TOKEN, &amp;token,
+                     &amp;token_len);
+    if (ret == -1) {
+        printf("socket getsockopt regular token\n");
+        return -1;
+    }
+
+    addr_len = sizeof(la);
+    ret = getsockname(sockfd, (struct sockaddr *)&amp;la, &amp;addr_len);
+    if (ret == -1) {
+        printf("getsockname local address and port used\n");
+        return -1;
+    }
+
+    printf("get the session ticket %d and transport param %d and"
+           "token %d, save it\n", ticket_len, param_len, token_len);
+
+    strcpy(msg, "hello quic server!");
+    ret = send(sockfd, msg, strlen(msg), MSG_SYN | MSG_FIN);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    printf("send %d\n", ret);
+
+    memset(msg, 0, sizeof(msg));
+    ret = recv(sockfd, msg, sizeof(msg), 0);
+    if (ret == -1) {
+        printf("recv error %d %d\n", ret, errno);
+        return 1;
+    }
+    printf("recv: \"%s\", len: %d\n", msg, ret);
+
+    close(sockfd);
+
+    printf("start new connection with the session ticket used...\n");
+    sleep(2);
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_QUIC);
+    if (sockfd &lt; 0) {
+        printf("socket create failed\n");
+        return -1;
+    }
+
+    /* bind previous address and port and set token for
+     * address validation.
+     */
+    if (bind(sockfd, (struct sockaddr *)&amp;la, addr_len)) {
+        printf("socket bind failed\n");
+        return -1;
+    }
+    ret = setsockopt(sockfd, SOL_QUIC, QUIC_SOCKOPT_TOKEN, token,
+                     token_len);
+    if (ret == -1) {
+        printf("socket setsockopt token\n");
+        return -1;
+    }
+
+    ra.sin_family = AF_INET;
+    ra.sin_port = htons(atoi(argv[3]));
+    inet_pton(AF_INET, argv[2], &amp;ra.sin_addr.s_addr);
+
+    if (connect(sockfd, (struct sockaddr *)&amp;ra, sizeof(ra))) {
+        printf("socket connect failed\n");
+        return -1;
+    }
+
+    /* set the ticket and remote param and early data into
+     * the socket for handshake.
+     */
+    ret = setsockopt(sockfd, SOL_QUIC, QUIC_SOCKOPT_SESSION_TICKET,
+                     ticket, ticket_len);
+    if (ret == -1) {
+        printf("socket setsockopt session ticket\n");
+        return -1;
+    }
+    ret = setsockopt(sockfd, SOL_QUIC, QUIC_SOCKOPT_TRANSPORT_PARAM,
+                     &amp;param, param_len);
+    if (ret == -1) {
+        printf("socket setsockopt remote transport param\n");
+        return -1;
+    }
+    strcpy(msg, "hello quic server, I'm back!");
+    ret = send(sockfd, msg, strlen(msg), MSG_SYN | MSG_FIN);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    printf("send %d\n", ret);
+
+    if (quic_client_handshake(sockfd, NULL, NULL))
+        return -1;
+
+    memset(msg, 0, sizeof(msg));
+    ret = recv(sockfd, msg, sizeof(msg), 0);
+    if (ret == -1) {
+        printf("recv error %d %d\n", ret, errno);
+        return 1;
+    }
+    printf("recv: \"%s\", len: %d\n", msg, ret);
+
+    close(sockfd);
+    return 0;
+}
+
+static int do_server(int argc, char *argv[])
+{
+    struct quic_transport_param param = {};
+    struct sockaddr_in sa = {};
+    int listenfd, sockfd, ret;
+    unsigned int addrlen;
+    char msg[50];
+
+    if (argc &lt; 5) {
+        printf("%s server &lt;LOCAL ADDR> &lt;LOCAL PORT>"
+               "&lt;PRIVATE_KEY_FILE> &lt;CERTIFICATE_FILE>\n", argv[0]);
+        return 0;
+    }
+
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(atoi(argv[3]));
+    inet_pton(AF_INET, argv[2], &amp;sa.sin_addr.s_addr);
+    listenfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_QUIC);
+    if (listenfd &lt; 0) {
+        printf("socket create failed\n");
+        return -1;
+    }
+    if (bind(listenfd, (struct sockaddr *)&amp;sa, sizeof(sa))) {
+        printf("socket bind failed\n");
+        return -1;
+    }
+    if (listen(listenfd, 1)) {
+        printf("socket listen failed\n");
+        return -1;
+    }
+    param.validate_peer_address = 1;
+    if (setsockopt(listenfd, SOL_QUIC, QUIC_SOCKOPT_TRANSPORT_PARAM,
+                   &amp;param, sizeof(param)))
+        return -1;
+    addrlen = sizeof(sa);
+    sockfd = accept(listenfd, (struct sockaddr *)&amp;sa, &amp;addrlen);
+    if (sockfd &lt; 0) {
+        printf("socket accept failed %d %d\n", errno, sockfd);
+        return -1;
+    }
+
+    if (quic_server_handshake(sockfd, argv[4], argv[5]))
+        return -1;
+
+    memset(msg, 0, sizeof(msg));
+    ret = recv(sockfd, msg, sizeof(msg), 0);
+    if (ret == -1) {
+        printf("recv error %d %d\n", ret, errno);
+        return 1;
+    }
+    printf("recv: \"%s\", len: %d\n", msg, ret);
+
+    strcpy(msg, "hello quic client!");
+    ret = send(sockfd, msg, strlen(msg), MSG_SYN | MSG_FIN);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    printf("send %d\n", ret);
+
+    close(sockfd);
+
+    printf("wait for the client next connection...\n");
+
+    addrlen = sizeof(sa);
+    sockfd = accept(listenfd, (struct sockaddr *)&amp;sa, &amp;addrlen);
+    if (sockfd &lt; 0) {
+        printf("socket accept failed %d %d\n", errno, sockfd);
+        return -1;
+    }
+
+    if (quic_server_handshake(sockfd, argv[4], argv[5]))
+        return -1;
+
+    memset(msg, 0, sizeof(msg));
+    ret = recv(sockfd, msg, sizeof(msg), 0);
+    if (ret == -1) {
+        printf("recv error %d %d\n", ret, errno);
+        return 1;
+    }
+    printf("recv: \"%s\", len: %d\n", msg, ret);
+
+    strcpy(msg, "hello quic client! welcome back!");
+    ret = send(sockfd, msg, strlen(msg), MSG_SYN | MSG_FIN);
+    if (ret == -1) {
+        printf("send error %d %d\n", ret, errno);
+        return -1;
+    }
+    printf("send %d\n", ret);
+
+    close(sockfd);
+    close(listenfd);
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc &lt; 2 || (strcmp(argv[1], "server") &amp;&amp;
+        strcmp(argv[1], "client"))) {
+        printf("%s server|client ...\n", argv[0]);
+        return 0;
+    }
+
+    if (!strcmp(argv[1], "client"))
+        return do_client(argc, argv);
+
+    return do_server(argc, argv);
+}
+</sourcecode>
+</section>
+
+<section title='Example For Kernel Consumers Archtechiture Design'>
+<t>In-kernel QUIC enables the usage for kernel consumers, here is the
+design in Linux Kernel</t>
+<t>Handshake Archtechiture</t>
+<sourcecode type="language C">
++------+  +------+
+| APP1 |  | APP2 | ...
++------+  +------+
++--------------------------------------------+
+|            libquic (ktls-utils)            |&lt;----------+
+|  {quic_handshake_server/client/param()}    |           |
++--------------------------------------------+  +------------------+
+ {send/recvmsg()}       {set/getsockopt()}      |tlshd (ktls-utils)|
+ [CMSG handshake_info]  [SOCKOPT_CRYPTO_SECRET] +------------------+
+                        [SOCKOPT_TRANSPORT_PARAM_EXT]
+            | ^                    | ^                   | ^
+Userspace   | |                    | |                   | |
+------------|-|--------------------|-|-------------------|-|------
+Kernel      | |                    | |                   | |
+            v |                    v |                   v |
++---------------------------------------------+    +-------------+
+| socket (IPPRTOTO_QUIC) |      protocol      |&lt;-+ | handshake   |
++---------------------------------------------+  | | netlink APIs|
+| stream | connection_id | cong | path |timer |  | +-------------+
++---------------------------------------------+  |    |      |
+|   packet  |   frame  |  crypto   |   pnmap  |  | +-----+ +-----+
++---------------------------------------------+  | |     | |     |
+|         input        |       output         |  |-| SMB | | NFS |..
++---------------------------------------------+  | |     | |     |
+|                UDP tunnels                  |  | +-----+ +--+--+
++---------------------------------------------+  +------------|
+</sourcecode>
+<t>User Data Archtechiture</t>
+<sourcecode type="language C">
++------+  +------+
+| APP1 |  | APP2 | ...
++------+  +------+
+  {send/recvmsg()}         {set/getsockopt()}
+  [CMSG stream_info]       [SOCKOPT_KEY_UPDATE]
+                           [SOCKOPT_CONNECTION_MIGRATION]
+                           [SOCKOPT_STREAM_OPEN/RESET/STOP_SENDING]
+                           [...]
+          | ^                    | ^
+Userspace | |                    | |
+----------|-|--------------------|-|----------------
+Kernel    | |                    | |
+          v |                    v |
++---------------------------------------------+
+| socket (IPPRTOTO_QUIC) |      protocol      |&lt;-+ {kernel_}
++---------------------------------------------+  | {send/recvmsg()}
+| stream | connection_id | cong | path |timer |  | {set/getsockopt()}
++---------------------------------------------+  |
+|   packet  |   frame  |  crypto   |   pnmap  |  | +-----+ +-----+
++---------------------------------------------+  | |     | |     |
+|         input        |       output         |  |-| SMB | | NFS |..
++---------------------------------------------+  | |     | |     |
+|                UDP tunnels                  |  | +-----+ +--+--+
++---------------------------------------------+  +------------|
+</sourcecode>
+</section>
+</back>
+</rfc>
