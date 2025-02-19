@@ -63,7 +63,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends tshark
       - name: Install Linux QUIC module
         run: |
-          git clone https://github.com/lxin/quic.git
+          git clone https://github.com/lxin/quic.git -b workflows
           cd quic && sed -i '/LIBGNUTLS/d' configure.ac
           ./autogen.sh && ./configure --prefix=/usr
           sudo make -C modules install
