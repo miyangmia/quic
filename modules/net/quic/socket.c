@@ -111,9 +111,11 @@ struct sock *quic_sock_lookup(struct sk_buff *skb, union quic_addr *sa, union qu
 	head = quic_sock_head(net, sa, da);
 	spin_lock(&head->lock);
 	sk_for_each(sk, &head->head) {
+		if (net != sock_net(sk))
+			continue;
 		paths = quic_paths(sk);
-		if (net == sock_net(sk) && !quic_is_closed(sk) &&
-		    !quic_path_cmp_saddr(paths, 0, sa) && !quic_path_cmp_daddr(paths, 0, da) &&
+		if (!quic_path_cmp_saddr(paths, 0, sa) &&
+		    !quic_path_cmp_daddr(paths, 0, da) &&
 		    (!dcid || !quic_conn_id_cmp(quic_path_dcid(paths), dcid)))
 			break;
 	}
